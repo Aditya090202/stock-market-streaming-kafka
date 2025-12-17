@@ -5,6 +5,20 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime
 from confluent_kafka import Producer
+import sys
+from pathlib import Path
+# Add parent directory to Python path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from models.events import (
+    TradeEvent,
+    QuoteEvent, 
+    BarEvent,
+    Source,
+    EventType,
+    TradePayload,
+    QuotePayload,
+    BarPayload
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -12,6 +26,156 @@ load_dotenv()
 # create a producer and have it send messages to all three topics
 alpaca_producer = Producer({'bootstrap.servers': 'localhost:9092'})
 
+
+"""
+## FUNCTIONS
+"""
+
+def get_kafka_topic(event):
+    """
+    Determine the Kafka topic name based on the event type.
+    
+    Args:
+        event: EventMessage instance (TradeEvent, QuoteEvent, or BarEvent)
+    
+    Returns:
+        str: Kafka topic name ("market.trades", "market.quotes", or "market.bars")
+    """
+    if event.event_type == EventType.trade:
+        return "market.trades"
+    elif event.event_type == EventType.quote:
+        return "market.quotes"
+    elif event.event_type == EventType.bar:
+        return "market.bars"
+    else:
+        raise ValueError(f"Unknown event type: {event.event_type}")
+
+def parse_alpaca_timestamp(timestamp_value):
+    """
+    Convert Alpaca timestamp to datetime object.
+    Handles:
+    - ISO 8601/RFC3339 strings (e.g., "2025-12-17T02:43:34.949784589Z")
+    - Numeric timestamps (nanoseconds or seconds)
+    - Numeric timestamps as strings
+    
+    Args:
+        timestamp_value: Timestamp as string or int/float
+    
+    Returns:
+        datetime object or None if parsing fails
+    """
+    try:
+        if isinstance(timestamp_value, str):
+            # Check if it's an ISO 8601 format (contains 'T' or '-')
+            if 'T' in timestamp_value or '-' in timestamp_value:
+                # Parse ISO 8601 format, removing 'Z' and handling nanoseconds
+                timestamp_str = timestamp_value.replace('Z', '+00:00')
+                # Python's fromisoformat can't handle nanoseconds (9 digits), only microseconds (6 digits)
+                # Truncate to microseconds if needed
+                if '.' in timestamp_str:
+                    parts = timestamp_str.split('.')
+                    fractional_with_tz = parts[1]
+                    # Extract timezone if present
+                    tz_part = ''
+                    for i, char in enumerate(fractional_with_tz):
+                        if char in ['+', '-']:
+                            tz_part = fractional_with_tz[i:]
+                            fractional_with_tz = fractional_with_tz[:i]
+                            break
+                    # Truncate to 6 digits (microseconds)
+                    fractional = fractional_with_tz[:6].ljust(6, '0')
+                    timestamp_str = f"{parts[0]}.{fractional}{tz_part}"
+                return datetime.fromisoformat(timestamp_str)
+            else:
+                # Try to parse as numeric timestamp string
+                timestamp_value = int(timestamp_value)
+        
+        # Handle numeric timestamps
+        # If value is > 1e12, it's likely in nanoseconds
+        if timestamp_value > 1e12:
+            return datetime.fromtimestamp(timestamp_value / 1e9)
+        else:
+            # Might be in seconds already
+            return datetime.fromtimestamp(timestamp_value)
+    except (ValueError, TypeError, OSError) as e:
+        print(f"Error parsing timestamp: {timestamp_value} - {e}")
+        return None
+
+"""
+This function will take in a "str" message => a structured "str" message in JSON
+It will determine if the message received from the Alpaca API is a trade, quote, or a bar
+Returns None if the message is not a trade/quote/bar event (e.g., subscription confirmations)
+"""
+def filter_event_messages(event_msg):
+    # Check if data array is empty or if first element doesn't have required fields
+    if not event_msg or not isinstance(event_msg, list) or len(event_msg) == 0:
+        return None
+    
+    msg = event_msg[0]
+    msg_type = msg.get("T")
+    
+    # Skip non-data messages (subscription confirmations, errors, etc.)
+    if msg_type not in ["t", "q", "d", "b"]:
+        return None
+    
+    # Check if required fields exist
+    if "t" not in msg or "S" not in msg:
+        return None
+    
+    # Convert Alpaca timestamp to datetime
+    event_ts = parse_alpaca_timestamp(msg["t"])
+    if event_ts is None:
+        return None
+    
+    symbol = msg["S"]
+    
+    # Create the event message payload
+    if msg_type == "t":
+        payload = TradePayload(
+            price=msg["p"],
+            size=msg["s"]
+        )
+        event = TradeEvent(
+            event_type=EventType.trade,
+            source=Source.alpaca,
+            symbol=symbol,
+            event_ts=event_ts,
+            payload=payload
+        )
+        return event
+
+    elif msg_type == "q":
+        payload = QuotePayload(
+            bid_price=msg["bp"],
+            bid_size=msg["bs"],
+            ask_price=msg["ap"],
+            ask_size=msg["as"]
+        )
+        event = QuoteEvent(
+            event_type=EventType.quote,
+            source=Source.alpaca,
+            symbol=symbol,
+            event_ts=event_ts,
+            payload=payload
+        )
+        return event
+    else:  # msg_type in ["d", "b"] - daily or minute bars
+        payload = BarPayload(
+            timeframe="1D" if msg_type == "d" else "1Min",
+            open=msg["o"],
+            high=msg["h"],
+            low=msg["l"],
+            close=msg["c"],
+            volume=msg.get("v", 0)
+        )
+        event = BarEvent(
+            event_type=EventType.bar,
+            source=Source.alpaca,
+            symbol=symbol,
+            event_ts=event_ts,
+            payload=payload
+        )
+        return event
 
 
 def print_connection_info(api_key):
@@ -31,14 +195,14 @@ def print_message(item):
         print(f"📨 {msg_type}: {item}")
 
 async def connect_to_alpaca():
-    uri = "wss://stream.data.alpaca.markets/v1beta3/crypto/us"
-    
+    uri_stocks = "wss://stream.data.alpaca.markets/v2/iex"
+    uri_crpyto = "wss://stream.data.alpaca.markets/v1beta3/crypto/us"
     # Get credentials from environment variables
     api_key = os.getenv("APCA_API_KEY_ID")
     api_secret = os.getenv("APCA_API_SECRET_KEY")
 
     
-    async with websockets.connect(uri) as websocket:
+    async with websockets.connect(uri_crpyto) as websocket:
         # Authenticate with Alpaca
         auth_message = {
             "action": "auth",
@@ -60,28 +224,61 @@ async def connect_to_alpaca():
             return
         
         # Subscribe to crypto trades and quotes
-        subscribe_message = {
+        subscribe_message_crypto = {
             "action": "subscribe",
             "trades": ["BTC/USD", "ETH/USD", "SOL/USD"],
             "quotes": ["BTC/USD", "ETH/USD", "SOL/USD"],
             "bars": ["XRP/USD"]
         }
-        await websocket.send(json.dumps(subscribe_message))
-        print(f"Sent subscription for: BTC/USD, ETH/USD, SOL/USD")
+
+        subscribe_message_stocks = {
+            "action": "subscribe",
+            "trades": ["AAPL", "MSFT", "NVDA"],
+            "quotes": ["ORCL"],
+            "bars": ["TSLA"]
+        }
+
+        await websocket.send(json.dumps(subscribe_message_crypto))
+        #print(f"Sent subscription for: BTC/USD, ETH/USD, SOL/USD")
 
         subscribe_response = await websocket.recv()
         sub_data = json.loads(subscribe_response)
         print(f"Subscribe response: {sub_data}")
         
-        print("\n🔄 Waiting for crypto data (24/7)...\n")
+        #print("\n🔄 Waiting for crypto data (24/7)...\n")
 
-        async for message in websocket:
-            data = json.loads(message)
-            """
-            ### TODO ###
-            Create a function that can filter out quotes, trades and bars
-            Have it return a simple JSON format with relevant attributes
-            """
-            print(data)
+        message_count = 0
+        try:
+            async for message in websocket:
+                data = json.loads(message)
+                """
+                ### TODO ###
+                Create a function that can filter out quotes, trades and bars
+                Have it return a simple JSON format with relevant attributes
+                """
+                print(data)
+                event = filter_event_messages(data)
+                if event:  # Only print if we got a valid event
+                    # Get the appropriate Kafka topic for this event type
+                    topic = get_kafka_topic(event)
+                    # Send the event to Kafka
+                    alpaca_producer.produce(
+                        topic=topic,
+                        key=event.symbol,
+                        value=event.model_dump_json()
+                    )
+                    print(f"Sent to {topic}: {event.model_dump_json()}")
+                    
+                    message_count += 1
+                    # Flush every 10 messages to ensure delivery
+                    if message_count % 10 == 0:
+                        alpaca_producer.flush()
+        finally:
+            # Always flush remaining messages before exiting
+            print("\nFlushing remaining messages to Kafka...")
+            alpaca_producer.flush()
+            print("All messages delivered!")
             
 asyncio.run(connect_to_alpaca())
+
+
