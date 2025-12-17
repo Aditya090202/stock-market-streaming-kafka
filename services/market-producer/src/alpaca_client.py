@@ -3,7 +3,7 @@ import websockets
 import json
 import os
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone
 from confluent_kafka import Producer
 import sys
 from pathlib import Path
@@ -88,15 +88,23 @@ def parse_alpaca_timestamp(timestamp_value):
                 return datetime.fromisoformat(timestamp_str)
             else:
                 # Try to parse as numeric timestamp string
-                timestamp_value = int(timestamp_value)
+                # Use float() to preserve fractional precision
+                timestamp_value = float(timestamp_value)
         
-        # Handle numeric timestamps
-        # If value is > 1e12, it's likely in nanoseconds
-        if timestamp_value > 1e12:
-            return datetime.fromtimestamp(timestamp_value / 1e9)
+        # Handle numeric timestamps based on magnitude
+        # Current epoch values (Dec 2025):
+        #   Seconds:      ~1.7e9  (1,700,000,000)
+        #   Milliseconds: ~1.7e12 (1,700,000,000,000)
+        #   Nanoseconds:  ~1.7e18 (1,700,000,000,000,000,000)
+        if timestamp_value > 1e15:
+            # Nanoseconds (> 1e15)
+            return datetime.fromtimestamp(timestamp_value / 1e9, tz=timezone.utc)
+        elif timestamp_value > 1e12:
+            # Milliseconds (> 1e12 but < 1e15)
+            return datetime.fromtimestamp(timestamp_value / 1e3, tz=timezone.utc)
         else:
-            # Might be in seconds already
-            return datetime.fromtimestamp(timestamp_value)
+            # Seconds (< 1e12)
+            return datetime.fromtimestamp(timestamp_value, tz=timezone.utc)
     except (ValueError, TypeError, OSError) as e:
         print(f"Error parsing timestamp: {timestamp_value} - {e}")
         return None
@@ -145,11 +153,19 @@ def filter_event_messages(event_msg):
         return event
 
     elif msg_type == "q":
+        # Use .get() for optional fields to avoid KeyError
+        bid_price = msg.get("bp", 0)
+        ask_price = msg.get("ap", 0)
+        
+        # Validate required price fields
+        if bid_price == 0 and ask_price == 0:
+            return None
+            
         payload = QuotePayload(
-            bid_price=msg["bp"],
-            bid_size=msg["bs"],
-            ask_price=msg["ap"],
-            ask_size=msg["as"]
+            bid_price=bid_price,
+            bid_size=msg.get("bs"),
+            ask_price=ask_price,
+            ask_size=msg.get("as")
         )
         event = QuoteEvent(
             event_type=EventType.quote,
@@ -160,12 +176,22 @@ def filter_event_messages(event_msg):
         )
         return event
     else:  # msg_type in ["d", "b"] - daily or minute bars
+        # Use .get() with defaults to avoid KeyError on missing fields
+        open_price = msg.get("o")
+        high_price = msg.get("h")
+        low_price = msg.get("l")
+        close_price = msg.get("c")
+        
+        # Validate required OHLC fields
+        if None in [open_price, high_price, low_price, close_price]:
+            return None
+            
         payload = BarPayload(
             timeframe="1D" if msg_type == "d" else "1Min",
-            open=msg["o"],
-            high=msg["h"],
-            low=msg["l"],
-            close=msg["c"],
+            open=open_price,
+            high=high_price,
+            low=low_price,
+            close=close_price,
             volume=msg.get("v", 0)
         )
         event = BarEvent(

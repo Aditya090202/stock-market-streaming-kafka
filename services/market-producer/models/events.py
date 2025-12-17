@@ -15,8 +15,8 @@ class Source(str, Enum):
     finnhub = "finnhub"
 
 class EventType(str, Enum):
-    trade = "trade",
-    quote = "quote",
+    trade = "trade"
+    quote = "quote"
     bar = "bar"
 
 # this is the base model for every type of message
