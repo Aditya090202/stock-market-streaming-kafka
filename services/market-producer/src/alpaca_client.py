@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from confluent_kafka import Producer
 import sys
 from pathlib import Path
-# Add parent directory to Python path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to Python path (for shared models)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from models.events import (
     TradeEvent,
     QuoteEvent, 
@@ -52,60 +52,38 @@ def get_kafka_topic(event):
 
 def parse_alpaca_timestamp(timestamp_value):
     """
-    Convert Alpaca timestamp to datetime object.
-    Handles:
-    - ISO 8601/RFC3339 strings (e.g., "2025-12-17T02:43:34.949784589Z")
-    - Numeric timestamps (nanoseconds or seconds)
-    - Numeric timestamps as strings
+    Convert Alpaca ISO 8601/RFC3339 timestamp to datetime object.
     
     Args:
-        timestamp_value: Timestamp as string or int/float
+        timestamp_value: ISO 8601/RFC3339 string (e.g., "2025-12-17T02:43:34.949784589Z")
     
     Returns:
         datetime object or None if parsing fails
     """
     try:
-        if isinstance(timestamp_value, str):
-            # Check if it's an ISO 8601 format (contains 'T' or '-')
-            if 'T' in timestamp_value or '-' in timestamp_value:
-                # Parse ISO 8601 format, removing 'Z' and handling nanoseconds
-                timestamp_str = timestamp_value.replace('Z', '+00:00')
-                # Python's fromisoformat can't handle nanoseconds (9 digits), only microseconds (6 digits)
-                # Truncate to microseconds if needed
-                if '.' in timestamp_str:
-                    parts = timestamp_str.split('.')
-                    fractional_with_tz = parts[1]
-                    # Extract timezone if present
-                    tz_part = ''
-                    for i, char in enumerate(fractional_with_tz):
-                        if char in ['+', '-']:
-                            tz_part = fractional_with_tz[i:]
-                            fractional_with_tz = fractional_with_tz[:i]
-                            break
-                    # Truncate to 6 digits (microseconds)
-                    fractional = fractional_with_tz[:6].ljust(6, '0')
-                    timestamp_str = f"{parts[0]}.{fractional}{tz_part}"
-                return datetime.fromisoformat(timestamp_str)
-            else:
-                # Try to parse as numeric timestamp string
-                # Use float() to preserve fractional precision
-                timestamp_value = float(timestamp_value)
+        # Replace 'Z' with '+00:00' for Python's fromisoformat
+        timestamp_str = timestamp_value.replace('Z', '+00:00')
         
-        # Handle numeric timestamps based on magnitude
-        # Current epoch values (Dec 2025):
-        #   Seconds:      ~1.7e9  (1,700,000,000)
-        #   Milliseconds: ~1.7e12 (1,700,000,000,000)
-        #   Nanoseconds:  ~1.7e18 (1,700,000,000,000,000,000)
-        if timestamp_value > 1e15:
-            # Nanoseconds (> 1e15)
-            return datetime.fromtimestamp(timestamp_value / 1e9, tz=timezone.utc)
-        elif timestamp_value > 1e12:
-            # Milliseconds (> 1e12 but < 1e15)
-            return datetime.fromtimestamp(timestamp_value / 1e3, tz=timezone.utc)
-        else:
-            # Seconds (< 1e12)
-            return datetime.fromtimestamp(timestamp_value, tz=timezone.utc)
-    except (ValueError, TypeError, OSError) as e:
+        # Python's fromisoformat can't handle nanoseconds (9 digits), only microseconds (6 digits)
+        # Truncate to microseconds if needed
+        if '.' in timestamp_str:
+            parts = timestamp_str.split('.')
+            fractional_with_tz = parts[1]
+            
+            # Extract timezone if present
+            tz_part = ''
+            for i, char in enumerate(fractional_with_tz):
+                if char in ['+', '-']:
+                    tz_part = fractional_with_tz[i:]
+                    fractional_with_tz = fractional_with_tz[:i]
+                    break
+            
+            # Truncate to 6 digits (microseconds)
+            fractional = fractional_with_tz[:6].ljust(6, '0')
+            timestamp_str = f"{parts[0]}.{fractional}{tz_part}"
+        
+        return datetime.fromisoformat(timestamp_str)
+    except (ValueError, TypeError) as e:
         print(f"Error parsing timestamp: {timestamp_value} - {e}")
         return None
 
@@ -203,13 +181,6 @@ def filter_event_messages(event_msg):
         )
         return event
 
-
-def print_connection_info(api_key):
-    """Print connection and debugging information"""
-    print(f"Connecting to Alpaca Crypto stream...")
-    print(f"API Key present: {bool(api_key)}")
-    print(f"Current time: {datetime.now()}")
-
 def print_message(item):
     """Pretty print received messages"""
     msg_type = item.get('T', 'unknown')
@@ -252,8 +223,8 @@ async def connect_to_alpaca():
         # Subscribe to crypto trades and quotes
         subscribe_message_crypto = {
             "action": "subscribe",
-            "trades": ["BTC/USD", "ETH/USD", "SOL/USD"],
-            "quotes": ["BTC/USD", "ETH/USD", "SOL/USD"],
+            "trades": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"],
+            "quotes": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"],
             "bars": ["XRP/USD"]
         }
 
@@ -277,12 +248,12 @@ async def connect_to_alpaca():
         try:
             async for message in websocket:
                 data = json.loads(message)
+                print(data)
                 """
                 ### TODO ###
                 Create a function that can filter out quotes, trades and bars
                 Have it return a simple JSON format with relevant attributes
                 """
-                print(data)
                 event = filter_event_messages(data)
                 if event:  # Only print if we got a valid event
                     # Get the appropriate Kafka topic for this event type

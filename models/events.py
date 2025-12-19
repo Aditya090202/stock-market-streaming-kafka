@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal, Optional
 from uuid import uuid4
+from .tick import Tick
 
 """
 example = Source.alpaca or Source.finnhub
@@ -40,6 +41,7 @@ class EventMessage(BaseModel):
     event_ts: datetime
     # a timestamp for when this message was ingested into the kafka event stream
     ingested_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
 
 class TradePayload(BaseModel):
 
