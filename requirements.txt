@@ -1,6 +1,38 @@
-confluent-kafka
-websockets
-python-dotenv
-fastapi
-uvicorn 
-pydantic
+# Direct runtime dependencies (project-level)
+confluent-kafka==2.12.2
+aiokafka==0.12.0
+websockets==15.0.1
+python-dotenv==1.2.1
+fastapi==0.125.0
+uvicorn==0.38.0
+pydantic==2.12.5
+
+# Market data clients (used by `services/market-producer`)
+alpaca-py==0.43.2
+finnhub-python==2.4.26
+
+# Runtime pins from the current venv (helps keep installs reproducible)
+annotated-doc==0.0.4
+anyio==4.12.0
+async-timeout==5.0.1
+certifi==2026.1.4
+charset-normalizer==3.4.4
+click==8.3.1
+h11==0.16.0
+idna==3.11
+msgpack==1.1.2
+numpy==2.4.1
+packaging==25.0
+pandas==2.3.3
+pydantic_core==2.41.5
+python-dateutil==2.9.0.post0
+pytz==2025.2
+requests==2.32.5
+six==1.17.0
+sseclient-py==1.9.0
+starlette==0.50.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2025.3
+urllib3==2.6.3
+annotated-types==0.7.0
